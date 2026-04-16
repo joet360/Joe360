@@ -1,0 +1,166 @@
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: users
+// Document ID: {userId}
+// Fields:
+//   - uid: string (required)
+//   - email: string (required, email format)
+//   - displayName: string (optional)
+//   - photoURL: string (optional)
+//   - createdAt: string (required, date-time)
+//
+// Collection: tasks
+// Document ID: {taskId}
+// Fields:
+//   - userId: string (required, matches owner)
+//   - title: string (required, 1-100 chars)
+//   - description: string (optional, < 500 chars)
+//   - completed: bool (required)
+//   - dueDate: string (optional, date-time)
+//   - category: string (optional, < 50 chars)
+//   - createdAt: string (required, date-time)
+//
+// Collection: expenses
+// Document ID: {expenseId}
+// Fields:
+//   - userId: string (required, matches owner)
+//   - amount: number (required, positive)
+//   - category: string (required, < 50 chars)
+//   - description: string (optional, < 200 chars)
+//   - date: string (required, date-time)
+//   - createdAt: string (required, date-time)
+//
+// Collection: chats/{userId}/messages
+// Document ID: {messageId}
+// Fields:
+//   - userId: string (required, matches owner)
+//   - role: string (required, enum: ['user', 'assistant'])
+//   - content: string (required, < 5000 chars)
+//   - createdAt: string (required, date-time)
+//
+// ===============================================================
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.userId;
+    }
+
+    function isRequestOwner() {
+      return isAuthenticated() && request.auth.uid == request.resource.data.userId;
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string && dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "joetoms.shil@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return data.uid == request.auth.uid &&
+             data.email == request.auth.token.email &&
+             isValidEmail(data.email) &&
+             isValidDateString(data.createdAt);
+    }
+
+    function isValidTask(data) {
+      return data.userId == request.auth.uid &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 100 &&
+             data.completed is bool &&
+             (!('description' in data) || (data.description is string && data.description.size() <= 500)) &&
+             (!('category' in data) || (data.category is string && data.category.size() <= 50)) &&
+             (!('priority' in data) || (data.priority in ['High', 'Medium', 'Low'])) &&
+             (!('dueDate' in data) || isValidDateString(data.dueDate)) &&
+             (!('reminderAt' in data) || isValidDateString(data.reminderAt)) &&
+             isValidDateString(data.createdAt);
+    }
+
+    function isValidExpense(data) {
+      return data.userId == request.auth.uid &&
+             data.amount is number && data.amount > 0 &&
+             data.category is string && data.category.size() <= 50 &&
+             (!('description' in data) || (data.description is string && data.description.size() <= 200)) &&
+             isValidDateString(data.date) &&
+             isValidDateString(data.createdAt);
+    }
+
+    function isValidChatMessage(data, userId) {
+      return data.userId == userId &&
+             data.userId == request.auth.uid &&
+             data.role in ['user', 'assistant'] &&
+             data.content is string && data.content.size() <= 5000 &&
+             isValidDateString(data.createdAt);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if isOwner(userId) && isValidUser(request.resource.data) && 
+                    request.resource.data.uid == resource.data.uid &&
+                    request.resource.data.email == resource.data.email;
+    }
+
+    match /tasks/{taskId} {
+      allow read: if isDocOwner() || isAdmin();
+      allow create: if isRequestOwner() && isValidTask(request.resource.data);
+      allow update: if isDocOwner() && isRequestOwner() && isValidTask(request.resource.data) &&
+                    request.resource.data.userId == resource.data.userId;
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    match /expenses/{expenseId} {
+      allow read: if isDocOwner() || isAdmin();
+      allow create: if isRequestOwner() && isValidExpense(request.resource.data);
+      allow update: if isDocOwner() && isRequestOwner() && isValidExpense(request.resource.data) &&
+                    request.resource.data.userId == resource.data.userId;
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    match /chats/{userId}/messages/{messageId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) && isValidChatMessage(request.resource.data, userId);
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // Default deny
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}
